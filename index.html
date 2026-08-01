@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Bubble Math</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Bubble Math">
+<meta name="theme-color" content="#0b1030">
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; position: fixed; overscroll-behavior: none;
+    background: #0b1030;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+    touch-action: none;
+  }
+  canvas {
+    display: block; touch-action: none;
+  }
+  #ui {
+    position: fixed; inset: 0; pointer-events: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  .pill {
+    position: absolute; pointer-events: auto;
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(10,14,30,0.55);
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.16);
+    border-radius: 999px; color: #fff;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    user-select: none; -webkit-user-select: none;
+  }
+  #muteBtn {
+    top: 16px; left: 16px; width: 52px; height: 52px;
+    justify-content: center; font-size: 22px; cursor: pointer;
+  }
+  #targetCard {
+    top: 16px; right: 16px; padding: 8px 16px 8px 10px;
+    font-weight: 700; font-size: 17px; color: #ffd166;
+  }
+  #targetToggle {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.12); cursor: pointer; font-size: 16px;
+    flex-shrink: 0;
+  }
+  #targetLabel { white-space: nowrap; }
+  #refillBtn {
+    bottom: 20px; right: 20px; width: 60px; height: 60px;
+    justify-content: center; font-size: 30px; font-weight: 900;
+    cursor: pointer; color: #ff3d81; border-color: rgba(255,61,129,0.5);
+    background: rgba(20,10,24,0.65);
+  }
+  #brand {
+    bottom: 18px; left: 20px; padding: 6px 12px;
+    font-size: 12px; letter-spacing: 0.06em; color: rgba(255,255,255,0.45);
+    background: transparent; border: none; box-shadow: none;
+  }
+  .pill:active { transform: scale(0.94); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div class="pill" id="muteBtn">🔊</div>
+  <div class="pill" id="targetCard">
+    <div id="targetToggle">⭐</div>
+    <div id="targetLabel">Make 7</div>
+  </div>
+  <div class="pill" id="refillBtn">+</div>
+  <div class="pill" id="brand">BUBBLE MATH</div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- constants ----------
+  const MAX_VALUE = 50;
+  const BASE_RADIUS = 42;         // radius (css px) for value = 1
+  const DOUBLE_TAP_MS = 350;
+  const DOUBLE_TAP_DIST = 30;
+  const SPLIT_THRESHOLD = 46;     // finger separation (px) to commit a two-finger split
+  const DROP_MERGE_RATIO = 0.72;  // (r1+r2) multiple within which releasing merges
+  const HUES = [332, 190, 22, 96, 268, 48, 168, 210]; // curated bold palette
+
+  const NECK_MIN_RATIO = 0.12;    // stretch/r beyond which a connecting neck is drawn at all
+  const SPLIT_TRIGGER_RATIO = 0.75; // stretch/r beyond which pulling starts counting toward a split
+  const SPLIT_MAX_STRETCH_RATIO = 2.4; // stretch/r at which the pulled-off fraction saturates
+  const SPLIT_HOLD_TIME = 0.7;    // seconds held past trigger before it actually separates
+  const TEAR_STICKINESS = 0.92;   // how much a tearing bubble resists following the finger
+  const MOMENTUM_THRESHOLD = 45;  // px/s of closing speed needed to start a bond
+  const BOND_START_RATIO = 1.05;  // (r1+r2) multiple within which a bond can start
+  const BOND_BREAK_RATIO = 1.6;   // (r1+r2) multiple beyond which an active bond breaks
+  const BOND_SETTLE_RATIO = 0.55; // (r1+r2) multiple the pair converges to while bonding
+  const ELONGATE_TIME = 1.1;      // seconds a bond must hold before it commits to a merge
+
+  // ---------- canvas / sizing ----------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, bgGradient = null;
+
+  function buildBgGradient() {
+    const g = ctx.createRadialGradient(W*0.5, H*0.35, H*0.1, W*0.5, H*0.6, Math.max(W,H)*0.85);
+    g.addColorStop(0, '#1a2456');
+    g.addColorStop(0.55, '#0f1640');
+    g.addColorStop(1, '#060915');
+    return g;
+  }
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bgGradient = buildBgGradient();
+    bubbles.forEach(b => {
+      b.x = Math.min(Math.max(b.x, b.r), Math.max(b.r, W - b.r));
+      b.y = Math.min(Math.max(b.y, b.r), Math.max(b.r, H - b.r));
+    });
+    if (ghost) {
+      ghost.x = clamp(ghost.x, ghost.r+30, Math.max(ghost.r+30, W-ghost.r-30));
+      ghost.y = clamp(ghost.y, ghost.r+100, Math.max(ghost.r+100, H-ghost.r-110));
+    }
+  }
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+
+  function valueToRadius(v) {
+    const raw = BASE_RADIUS * Math.sqrt(v);
+    const cap = Math.min(W, H) * 0.42;
+    return Math.min(raw, cap || raw);
+  }
+
+  // ---------- state ----------
+  let bubbles = [];
+  let nextId = 1;
+  let particles = [];
+  let rings = [];
+  let bonds = [];  // {aId, bId, timer}
+  let mathLabels = []; // floating equation texts
+  let bgBubbles = [];
+  let ghost = null;    // the target socket sitting on the mat
+  let finale = null;   // last-bubble-standing celebration state
+  let soloTime = 0;    // how long exactly one bubble has been left alone
+  let lastTap = null; // {bubbleId, time, x, y}
+  const pointerPos = new Map();    // pointerId -> {x,y}
+  const pointerBubble = new Map(); // pointerId -> bubbleId
+
+  let muted = localStorage.getItem('bubblemath.muted') === '1';
+  let targetEnabled = localStorage.getItem('bubblemath.target') !== '0';
+  let targetValue = randInt(2, 20);
+
+  function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
+  function randInt(a,b){ return a + Math.floor(Math.random()*(b-a+1)); }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  // ---------- bubble factory ----------
+  function makeBubble(x, y, value, opts) {
+    opts = opts || {};
+    const r = valueToRadius(value);
+    const b = {
+      id: nextId++,
+      x, y, value,
+      r, dispR: r, // displayed radius eases toward r each frame
+      hue: opts.hue != null ? opts.hue : HUES[randInt(0, HUES.length-1)],
+      vx: 0, vy: 0,
+      phase: Math.random()*Math.PI*2,
+      phaseSpeed: 0.3 + Math.random()*0.4,
+      scale: opts.popIn ? 0.25 : 1,
+      dragPointerId: null,
+      fingerX: 0, fingerY: 0,
+      dragStartX: 0, dragStartY: 0, dragMoved: false,
+      stretch: 0, pullHold: 0,
+      bondCooldown: opts.bondCooldown || 0, // seconds of immunity from auto-bonding
+      isSplitting: false, splitFixedX: 0, splitFixedY: 0, splitPointerIds: null,
+    };
+    bubbles.push(b);
+    return b;
+  }
+
+  function setValue(b, v) {
+    b.value = v;
+    b.r = valueToRadius(v);
+  }
+
+  function bubbleById(id){ return bubbles.find(b => b.id === id); }
+  function closingSpeed(a, b, d) {
+    if (d < 0.0001) return 0;
+    const dvx = a.vx-b.vx, dvy = a.vy-b.vy;
+    const dx = b.x-a.x, dy = b.y-a.y;
+    return (dx*dvx + dy*dvy)/d; // positive = distance shrinking
+  }
+  function isBonded(id) { return bonds.some(bo => bo.aId === id || bo.bId === id); }
+  // Springiness of the finger-follow, per bubble. Big/heavy bubbles lag more. The body
+  // always converges on the finger (unlike a hard speed cap, which could never catch up
+  // on a long drag), but during a fast drag it trails far enough behind to read as a
+  // visible stretch: at a steady finger speed v the gap settles at roughly v/followRate.
+  function followRate(r) { return clamp(600/r, 3, 12); }
+
+  function spawnInitial() {
+    const starters = [1,2,3,3,4,5,6];
+    starters.forEach((v, i) => {
+      let x, y, tries = 0;
+      do {
+        x = W*0.15 + Math.random()*W*0.7;
+        y = H*0.2 + Math.random()*H*0.55;
+        tries++;
+      } while (tries < 12 && bubbles.some(b => dist(x,y,b.x,b.y) < b.r + valueToRadius(v) + 10));
+      makeBubble(x, y, v);
+    });
+  }
+
+  function spawnDecorative() {
+    bgBubbles = [];
+    for (let i=0;i<14;i++) {
+      bgBubbles.push({
+        x: Math.random()*W, y: Math.random()*H,
+        r: 3 + Math.random()*9,
+        speed: 6 + Math.random()*14,
+        wobble: Math.random()*Math.PI*2,
+        alpha: 0.06 + Math.random()*0.10,
+      });
+    }
+  }
+
+  // ---------- audio ----------
+  let audioCtx = null;
+  function initAudio() {
+    if (audioCtx) { if (audioCtx.state === 'suspended') audioCtx.resume(); return; }
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { audioCtx = null; }
+  }
+  function freqForValue(v) {
+    return clamp(720 - (v-1)*10, 140, 720);
+  }
+  function tone(freq, {start=0, dur=0.16, type='sine', peak=0.22, glideTo=null} = {}) {
+    if (muted || !audioCtx) return;
+    const t0 = audioCtx.currentTime + start;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (glideTo != null) osc.frequency.exponentialRampToValueAtTime(Math.max(40,glideTo), t0+dur*0.9);
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(peak, t0+0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0+dur);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0); osc.stop(t0+dur+0.02);
+  }
+  function playPop(v){ tone(freqForValue(v)*1.25, {dur:0.11, glideTo:freqForValue(v)}); }
+  function playMerge(v1,v2,sum){
+    tone(freqForValue(Math.max(v1,v2))*1.05, {dur:0.24, glideTo:freqForValue(sum), type:'triangle', peak:0.26});
+  }
+  function playSplit(vA,vB){
+    tone(freqForValue(vA), {dur:0.14, type:'triangle'});
+    tone(freqForValue(vB), {dur:0.14, start:0.05, type:'triangle'});
+  }
+  function playCelebrate(){
+    [523,659,784,1047].forEach((f,i)=> tone(f, {dur:0.16, start:i*0.09, type:'triangle', peak:0.2}));
+  }
+
+  // ---------- particles / rings ----------
+  function burst(x, y, color, count, speedMax) {
+    for (let i=0;i<count;i++) {
+      const a = Math.random()*Math.PI*2;
+      const s = 40 + Math.random()*(speedMax||140);
+      particles.push({
+        x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s,
+        life: 0.5+Math.random()*0.4, maxLife: 0.9,
+        color, size: 2+Math.random()*3,
+      });
+    }
+  }
+  function addRing(x,y,color,maxR){
+    rings.push({x,y,r:8,maxR,color,alpha:0.9});
+  }
+  function addMathLabel(text, x, y, size) {
+    mathLabels.push({text, x: clamp(x, 80, W-80), y: Math.max(50, y), vy: -24, life: 2.4, maxLife: 2.4, size});
+  }
+
+  // ---------- target mode: a ghost socket sitting on the mat ----------
+  // The target is an outlined ghost bubble, sized exactly like a real bubble of that
+  // value. It only celebrates when a matching bubble is brought INTO it — matching by
+  // size and numeral is the goal, not mere existence somewhere on the mat.
+  function pickNewTarget() {
+    const maxR = Math.min(W, H) * 0.24;
+    let v, tries = 0;
+    do { v = randInt(2, 20); tries++; }
+    while ((v === targetValue || valueToRadius(v) > maxR) && tries < 40);
+    targetValue = v;
+    document.getElementById('targetLabel').textContent = 'Make ' + targetValue;
+    placeGhost();
+  }
+  function placeGhost() {
+    const r = valueToRadius(targetValue);
+    // keep clear of the corner buttons (top strip and bottom-right)
+    const xMin = r+30, xMax = Math.max(xMin, W-r-30);
+    const yMin = r+100, yMax = Math.max(yMin, H-r-110);
+    ghost = {
+      value: targetValue, r,
+      x: xMin + Math.random()*(xMax-xMin),
+      y: yMin + Math.random()*(yMax-yMin),
+      pulse: Math.random()*Math.PI*2,
+    };
+  }
+  function fillGhost(b) {
+    b.x = ghost.x; b.y = ghost.y; b.vx = 0; b.vy = 0; // snap into the socket
+    addRing(ghost.x, ghost.y, `hsla(${b.hue},90%,65%,0.9)`, ghost.r*2.2);
+    burst(ghost.x, ghost.y, 'hsl(48,95%,60%)', 30, 220);
+    addMathLabel(`⭐ ${ghost.value} ⭐`, ghost.x, ghost.y - ghost.r - 34, clamp(ghost.r*0.4, 26, 54));
+    playCelebrate();
+    pickNewTarget();
+  }
+
+  // ---------- finale: the last bubble standing bursts into its parts ----------
+  function doFinaleBurst(b) {
+    const V = b.value, hue = b.hue, cx = b.x, cy = b.y, R = b.dispR;
+    const parts = [];
+    if (V <= 12) { for (let i=0;i<V;i++) parts.push(1); }
+    else { // keep it countable: tens first, then the leftover ones
+      for (let i=0;i<Math.floor(V/10);i++) parts.push(10);
+      for (let i=0;i<V%10;i++) parts.push(1);
+    }
+    bubbles = bubbles.filter(bb => bb !== b);
+    if (parts.length <= 5) addMathLabel(V + ' = ' + parts.join(' + '), cx, cy - R - 34, 40);
+    else addMathLabel(`${V}!`, cx, cy - R - 34, 52);
+    burst(cx, cy, `hsl(${hue},95%,70%)`, 44, 260);
+    addRing(cx, cy, `hsla(${hue},90%,70%,0.9)`, R*2.3);
+    parts.forEach((v, i) => {
+      const ang = (i/parts.length)*Math.PI*2 + Math.random()*0.4;
+      const rad = R*0.45 + Math.random()*R*0.4;
+      const nb = makeBubble(
+        clamp(cx + Math.cos(ang)*rad, 50, W-50),
+        clamp(cy + Math.sin(ang)*rad, 50, H-50),
+        v, {popIn:true, bondCooldown: 2.5}); // let the rain settle before it can re-bond
+      nb.vx = Math.cos(ang)*(150+Math.random()*130);
+      nb.vy = Math.sin(ang)*(150+Math.random()*130);
+      tone(freqForValue(v)*1.25, {start: i*0.055, dur: 0.1, glideTo: freqForValue(v)});
+    });
+  }
+
+  // ---------- merge / split ----------
+  function mergeBubbles(a, c, sum) {
+    const nx = (a.x*a.r + c.x*c.r) / (a.r + c.r);
+    const ny = (a.y*a.r + c.y*c.r) / (a.r + c.r);
+    const hue = Math.random() < 0.5 ? a.hue : c.hue;
+    bubbles = bubbles.filter(bb => bb !== a && bb !== c);
+    bonds = bonds.filter(bo => bo.aId !== a.id && bo.bId !== a.id && bo.aId !== c.id && bo.bId !== c.id);
+    const merged = makeBubble(nx, ny, sum, {hue, popIn:true});
+    addRing(nx, ny, `hsla(${hue},90%,65%,0.85)`, merged.r*1.6);
+    burst(nx, ny, `hsl(${hue},90%,65%)`, 18, 160);
+    addMathLabel(`${a.value} + ${c.value} = ${sum}`, nx, ny - merged.r - 28, clamp(merged.r*0.32, 24, 48));
+    playMerge(a.value, c.value, sum);
+  }
+
+  // Releasing a bubble on top of another merges it, exactly as before. Momentum bonding
+  // is an easier additional route to the same result, not a replacement for this one.
+  function attemptDropMerge(b) {
+    let candidate = null, bestDist = Infinity;
+    for (const other of bubbles) {
+      if (other === b || other.dragPointerId != null || other.isSplitting) continue;
+      if (b.value + other.value > MAX_VALUE) continue;
+      const d = dist(b.x,b.y,other.x,other.y);
+      if (d < (b.r+other.r)*DROP_MERGE_RATIO && d < bestDist) { candidate = other; bestDist = d; }
+    }
+    if (!candidate) return;
+    bonds = bonds.filter(bo => bo.aId !== b.id && bo.bId !== b.id
+                            && bo.aId !== candidate.id && bo.bId !== candidate.id);
+    mergeBubbles(b, candidate, b.value + candidate.value);
+  }
+
+  function circleSplitFraction(m, r) {
+    // m = signed offset (along the pull axis) of the cut chord from the bubble center
+    const h = clamp(m, -r*0.96, r*0.96);
+    const absH = Math.abs(h);
+    const capArea = r*r*Math.acos(absH/r) - absH*Math.sqrt(Math.max(0, r*r - absH*absH));
+    const circleArea = Math.PI*r*r;
+    const areaPos = h >= 0 ? capArea : circleArea - capArea;
+    return areaPos / circleArea;
+  }
+
+  function commitSplit(b, ptA, ptB) {
+    b.isSplitting = false; b.splitPointerIds = null;
+    if (b.value <= 1) return;
+    const cx = b.splitFixedX, cy = b.splitFixedY, r = b.r;
+    let ax = ptB.x-ptA.x, ay = ptB.y-ptA.y;
+    const axisLen = Math.hypot(ax,ay) || 1;
+    ax /= axisLen; ay /= axisLen;
+    const m = (((ptA.x-cx)*ax + (ptA.y-cy)*ay) + ((ptB.x-cx)*ax + (ptB.y-cy)*ay)) / 2;
+    const vPos = clamp(Math.round(b.value*circleSplitFraction(m, r)), 1, b.value-1);
+    const offset = r*0.55;
+    b.x = cx - ax*offset; b.y = cy - ay*offset;
+    const bud = splitOff(b, vPos, cx + ax*offset, cy + ay*offset, {popIn:true});
+    bud.vx = ax*90;  bud.vy = ay*90;
+    b.vx   = -ax*90; b.vy   = -ay*90;
+  }
+
+  function splitOff(b, budValue, bx, by, opts) {
+    budValue = clamp(budValue, 1, b.value-1);
+    const orig = b.value;
+    const remValue = orig - budValue;
+    const hue = b.hue;
+    setValue(b, remValue);
+    const bud = makeBubble(bx, by, budValue, Object.assign({hue}, opts));
+    const midX = (b.x+bx)/2, midY = (b.y+by)/2;
+    addRing(midX, midY, `hsla(${hue},90%,70%,0.85)`, Math.max(b.dispR, bud.r)*1.5);
+    burst(midX, midY, `hsl(${hue},90%,65%)`, 14, 120);
+    addMathLabel(`${orig} − ${budValue} = ${remValue}`, midX, midY - Math.max(b.dispR, bud.r) - 28,
+      clamp(Math.max(b.dispR, bud.r)*0.32, 22, 44));
+    playSplit(remValue, budValue);
+    return bud;
+  }
+
+  function performSplitFromDrag(b) {
+    const stretchRatio = clamp(b.stretch/(b.r*SPLIT_MAX_STRETCH_RATIO), 0, 1);
+    const budFrac = 0.15 + 0.55*stretchRatio;
+    const budValue = Math.round(b.value*budFrac);
+    const bx = b.fingerX, by = b.fingerY;
+    const pointerId = b.dragPointerId;
+    let ux = bx-b.x, uy = by-b.y;
+    const ulen = Math.hypot(ux,uy) || 1;
+    ux/=ulen; uy/=ulen;
+
+    b.dragPointerId = null; b.pullHold = 0; b.stretch = 0;
+    const bud = splitOff(b, budValue, bx, by);
+    b.vx = -ux*40; b.vy = -uy*40; // gentle elastic recoil left behind
+
+    bud.dragPointerId = pointerId;
+    bud.fingerX = bx; bud.fingerY = by;
+    bud.dragStartX = b.dragStartX; bud.dragStartY = b.dragStartY; bud.dragMoved = true;
+    pointerBubble.set(pointerId, bud.id);
+  }
+
+  function doAutoSplit(b) {
+    if (b.value <= 1 || b.dragPointerId != null) return;
+    splitOff(b, Math.round(b.value/2), b.x + b.r*0.6, b.y, {popIn:true});
+  }
+
+  // ---------- input ----------
+  function toXY(e){ return {x: e.clientX, y: e.clientY}; }
+  // Smallest match wins, mirroring the draw order: the bubble visibly on top is the one
+  // you grab. Small fingers land on small bubbles more often than not.
+  function hitTest(x,y){
+    let best = null;
+    for (const b of bubbles) {
+      if (dist(x,y,b.x,b.y) <= b.r && (!best || b.r < best.r)) best = b;
+    }
+    return best;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    initAudio();
+    const {x,y} = toXY(e);
+    pointerPos.set(e.pointerId, {x,y});
+
+    if (lastTap && (performance.now()-lastTap.time) < DOUBLE_TAP_MS && dist(x,y,lastTap.x,lastTap.y) < DOUBLE_TAP_DIST) {
+      const b = bubbles.find(bb => bb.id === lastTap.bubbleId);
+      lastTap = null;
+      if (b && b.dragPointerId == null && b.value > 1) {
+        doAutoSplit(b);
+        return;
+      }
+    }
+
+    const hit = hitTest(x,y);
+    if (!hit) return;
+    if (finale) { finale = null; hit.scale = 1; } // grabbing the party bubble calls it off
+
+    // Second finger landing on a bubble that's already held: the original two-finger
+    // proportional split. Still here because he's already worked it out.
+    if (hit.dragPointerId != null && hit.dragPointerId !== e.pointerId) {
+      hit.isSplitting = true;
+      hit.splitFixedX = hit.x; hit.splitFixedY = hit.y;
+      hit.splitPointerIds = [hit.dragPointerId, e.pointerId];
+      hit.dragPointerId = null;
+      hit.pullHold = 0; hit.stretch = 0;
+      pointerBubble.set(e.pointerId, hit.id);
+      try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
+      return;
+    }
+    if (hit.dragPointerId != null || hit.isSplitting) return;
+
+    hit.dragPointerId = e.pointerId;
+    hit.fingerX = x; hit.fingerY = y;
+    hit.dragStartX = x; hit.dragStartY = y; hit.dragMoved = false;
+    hit.pullHold = 0;
+    pointerBubble.set(e.pointerId, hit.id);
+    try { canvas.setPointerCapture(e.pointerId); } catch(err) {}
+  }, {passive:false});
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointerPos.has(e.pointerId)) return;
+    e.preventDefault();
+    const {x,y} = toXY(e);
+    pointerPos.set(e.pointerId, {x,y});
+    const bId = pointerBubble.get(e.pointerId);
+    if (bId == null) return;
+    const b = bubbles.find(bb => bb.id === bId);
+    if (!b || b.dragPointerId !== e.pointerId) return;
+    b.fingerX = x; b.fingerY = y;
+    if (dist(x,y,b.dragStartX,b.dragStartY) > 8) b.dragMoved = true;
+  }, {passive:false});
+
+  function endPointer(e, isCancel) {
+    const {x,y} = toXY(e);
+    const bId = pointerBubble.get(e.pointerId);
+    pointerPos.delete(e.pointerId);
+    pointerBubble.delete(e.pointerId);
+    if (bId == null) return;
+    const b = bubbles.find(bb => bb.id === bId);
+    if (!b) return;
+
+    if (b.isSplitting) {
+      const otherId = b.splitPointerIds.find(id => id !== e.pointerId);
+      const posOther = pointerPos.get(otherId);
+      let committed = false;
+      if (!isCancel && posOther && dist(x,y,posOther.x,posOther.y) > SPLIT_THRESHOLD) {
+        commitSplit(b, {x,y}, posOther);
+        committed = true;
+        pointerBubble.delete(otherId);
+      }
+      if (!committed) {
+        b.isSplitting = false; b.splitPointerIds = null;
+        if (posOther) { // hand the bubble back to the finger still down
+          b.dragPointerId = otherId;
+          b.fingerX = posOther.x; b.fingerY = posOther.y;
+          b.dragStartX = posOther.x; b.dragStartY = posOther.y; b.dragMoved = true;
+          b.pullHold = 0;
+          pointerBubble.set(otherId, b.id);
+        }
+      }
+      return;
+    }
+
+    if (b.dragPointerId !== e.pointerId) return;
+    b.dragPointerId = null;
+    b.pullHold = 0;
+    if (!isCancel) {
+      if (!b.dragMoved) lastTap = {bubbleId: b.id, time: performance.now(), x, y};
+      else attemptDropMerge(b);
+    }
+  }
+  canvas.addEventListener('pointerup', (e) => { e.preventDefault(); endPointer(e, false); }, {passive:false});
+  canvas.addEventListener('pointercancel', (e) => { endPointer(e, true); });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // ---------- UI wiring ----------
+  const muteBtn = document.getElementById('muteBtn');
+  const targetToggle = document.getElementById('targetToggle');
+  const targetCard = document.getElementById('targetCard');
+  const targetLabel = document.getElementById('targetLabel');
+  const refillBtn = document.getElementById('refillBtn');
+
+  function refreshMuteUI(){ muteBtn.textContent = muted ? '🔇' : '🔊'; }
+  function refreshTargetUI(){
+    targetToggle.textContent = targetEnabled ? '⭐' : '☆';
+    targetLabel.style.display = targetEnabled ? 'block' : 'none';
+    targetLabel.textContent = 'Make ' + targetValue;
+  }
+  muteBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    muted = !muted;
+    localStorage.setItem('bubblemath.muted', muted ? '1':'0');
+    refreshMuteUI();
+    if (!muted) { initAudio(); playPop(3); }
+  });
+  targetCard.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    targetEnabled = !targetEnabled;
+    localStorage.setItem('bubblemath.target', targetEnabled ? '1':'0');
+    if (targetEnabled) pickNewTarget();
+    refreshTargetUI();
+  });
+  refillBtn.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    initAudio();
+    const v = randInt(1,9);
+    const x = W*0.2 + Math.random()*W*0.6;
+    const y = H*0.2 + Math.random()*H*0.5;
+    makeBubble(x, y, v, {popIn:true});
+    playPop(v);
+  });
+  refreshMuteUI();
+  refreshTargetUI();
+
+  // ---------- update / render ----------
+  function drawDots(cx, cy, ringR, value) {
+    const maxPerGroup = 10;
+    const groups = Math.ceil(value / maxPerGroup);
+    const gapDeg = 16;
+    const availDeg = 360 - gapDeg*groups;
+    const perGroupDeg = availDeg / groups;
+    const dotR = clamp(ringR*0.09, 1.6, 4.5);
+    let remaining = value, angleCursor = -90;
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    for (let g=0; g<groups; g++) {
+      const count = Math.min(maxPerGroup, remaining);
+      remaining -= count;
+      for (let i=0;i<count;i++){
+        const t = count === 1 ? 0.5 : i/(count-1);
+        const angle = (angleCursor + t*perGroupDeg) * Math.PI/180;
+        ctx.beginPath();
+        ctx.arc(cx + Math.cos(angle)*ringR, cy + Math.sin(angle)*ringR, dotR, 0, Math.PI*2);
+        ctx.fill();
+      }
+      angleCursor += perGroupDeg + gapDeg;
+    }
+  }
+
+  function drawBubble(b) {
+    const cx = b.x, cy = b.y;
+    const r = b.dispR * b.scale;
+    if (r < 1) return;
+
+    ctx.save();
+    const grad = ctx.createRadialGradient(cx - r*0.3, cy - r*0.35, r*0.05, cx, cy, r);
+    grad.addColorStop(0, `hsl(${b.hue},95%,78%)`);
+    grad.addColorStop(0.55, `hsl(${b.hue},88%,56%)`);
+    grad.addColorStop(1, `hsl(${b.hue},85%,40%)`);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.5, r*0.04);
+    ctx.strokeStyle = `hsla(${b.hue},95%,88%,0.9)`;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.ellipse(cx - r*0.32, cy - r*0.4, r*0.28, r*0.16, -0.5, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fill();
+
+    drawDots(cx, cy, r*0.74, b.value);
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, r*0.42, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(10,10,20,0.22)';
+    ctx.fill();
+
+    const fontSize = clamp(r*0.72, 12, 300);
+    ctx.font = `900 ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineWidth = fontSize*0.07;
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.strokeText(String(b.value), cx, cy+fontSize*0.03);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(String(b.value), cx, cy+fontSize*0.03);
+    ctx.restore();
+  }
+
+  function drawNeck(x1,y1,r1,x2,y2,r2,hue1,hue2,thinFactor) {
+    const d = dist(x1,y1,x2,y2);
+    if (d < 1) return;
+    const nx = (x2-x1)/d, ny = (y2-y1)/d;
+    const px = -ny, py = nx;
+    const waist = Math.min(r1,r2) * clamp(0.85 - 0.7*thinFactor, 0.06, 0.85);
+    ctx.beginPath();
+    ctx.moveTo(x1 + px*waist, y1 + py*waist);
+    ctx.lineTo(x2 + px*waist*0.9, y2 + py*waist*0.9);
+    ctx.lineTo(x2 - px*waist*0.9, y2 - py*waist*0.9);
+    ctx.lineTo(x1 - px*waist, y1 - py*waist);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(x1,y1,x2,y2);
+    grad.addColorStop(0, `hsl(${hue1},85%,55%)`);
+    grad.addColorStop(1, `hsl(${hue2},85%,55%)`);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  function drawProgressRing(cx,cy,rad,progress,color) {
+    if (progress <= 0) return;
+    ctx.save();
+    ctx.lineWidth = Math.max(2, rad*0.14);
+    ctx.strokeStyle = 'rgba(255,255,255,0.28)';
+    ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.arc(cx,cy,rad, -Math.PI/2, -Math.PI/2 + Math.PI*2*clamp(progress,0,1));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPreviewBud(cx,cy,r,hue,value) {
+    if (r < 3) return;
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    const grad = ctx.createRadialGradient(cx-r*0.3, cy-r*0.35, r*0.05, cx, cy, r);
+    grad.addColorStop(0, `hsl(${hue},95%,78%)`);
+    grad.addColorStop(1, `hsl(${hue},85%,45%)`);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = Math.max(1.5, r*0.05);
+    ctx.strokeStyle = `hsla(${hue},95%,88%,0.9)`;
+    ctx.stroke();
+    if (r > 9) {
+      const fontSize = clamp(r*0.7, 10, 200);
+      ctx.font = `900 ${fontSize}px -apple-system, BlinkMacSystemFont, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineWidth = fontSize*0.07;
+      ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+      ctx.strokeText(String(value), cx, cy+fontSize*0.03);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(String(value), cx, cy+fontSize*0.03);
+    }
+    ctx.restore();
+  }
+
+  function drawDragEffects(b) {
+    if (b.stretch <= b.dispR*NECK_MIN_RATIO) return;
+    const stretchRatio = clamp(b.stretch/(b.r*SPLIT_MAX_STRETCH_RATIO), 0, 1);
+    const budFrac = 0.15 + 0.55*stretchRatio;
+    const budValue = clamp(Math.round(b.value*budFrac), 1, Math.max(1,b.value-1));
+    const budR = valueToRadius(budValue);
+    drawNeck(b.x, b.y, b.dispR, b.fingerX, b.fingerY, budR, b.hue, b.hue,
+      clamp(0.5*stretchRatio + 0.5*(b.pullHold/SPLIT_HOLD_TIME), 0, 1));
+    drawPreviewBud(b.fingerX, b.fingerY, budR, b.hue, budValue);
+    if (b.pullHold > 0) {
+      drawProgressRing(b.fingerX, b.fingerY, budR+7, b.pullHold/SPLIT_HOLD_TIME, `hsl(${b.hue},95%,75%)`);
+    }
+    if (b.value > 1) { // the subtraction-in-progress, live above the neck
+      const mx = (b.x+b.fingerX)/2, my = (b.y+b.fingerY)/2;
+      drawEquationText(`${b.value} − ${budValue}`, mx,
+        Math.max(46, my - Math.max(b.dispR, budR) - 24),
+        clamp(Math.max(b.dispR, budR)*0.35, 20, 40), 0.95);
+    }
+  }
+
+  function drawSplitPreview(b) {
+    const pA = pointerPos.get(b.splitPointerIds[0]), pB = pointerPos.get(b.splitPointerIds[1]);
+    if (!pA || !pB) return;
+    const cx = b.splitFixedX, cy = b.splitFixedY, r = b.dispR;
+    let ax = pB.x-pA.x, ay = pB.y-pA.y;
+    const axisLen = Math.hypot(ax,ay) || 1;
+    ax /= axisLen; ay /= axisLen;
+    const m = clamp((((pA.x-cx)*ax + (pA.y-cy)*ay) + ((pB.x-cx)*ax + (pB.y-cy)*ay))/2, -r*0.96, r*0.96);
+    const vPos = clamp(Math.round(b.value*circleSplitFraction(m, r)), 1, b.value-1);
+    const vNeg = b.value - vPos;
+    const active = axisLen > SPLIT_THRESHOLD;
+
+    const px = -ay, py = ax;
+    const half = Math.sqrt(Math.max(0, r*r - m*m));
+    const lx = cx + ax*m, ly = cy + ay*m;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(lx - px*half, ly - py*half);
+    ctx.lineTo(lx + px*half, ly + py*half);
+    ctx.setLineDash([10,8]);
+    ctx.strokeStyle = active ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.4)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const off = r*0.33;
+    ctx.font = `900 ${clamp(r*0.4,14,80)}px -apple-system, BlinkMacSystemFont, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = active ? '#ffffff' : 'rgba(255,255,255,0.55)';
+    ctx.fillText(String(vPos), cx + ax*(m+off), cy + ay*(m+off));
+    ctx.fillText(String(vNeg), cx - ax*(off-m*0), cy - ay*(off-m*0));
+    ctx.restore();
+  }
+
+  function drawEquationText(text, x, y, size, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = `900 ${size}px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.lineWidth = size*0.13;
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  function drawBondEffects(bond) {
+    const a = bubbleById(bond.aId), b = bubbleById(bond.bId);
+    if (!a || !b) return;
+    const thinFactor = 1 - bond.timer/ELONGATE_TIME;
+    drawNeck(a.x, a.y, a.dispR, b.x, b.y, b.dispR, a.hue, b.hue, thinFactor);
+    const midX=(a.x+b.x)/2, midY=(a.y+b.y)/2;
+    const ringR = Math.max(a.dispR,b.dispR)*0.5 + 10;
+    drawProgressRing(midX, midY, ringR, bond.timer/ELONGATE_TIME, `hsl(${a.hue},95%,75%)`);
+    // the sum-in-progress hovers over the blend the whole time it can still be undone
+    const topY = Math.min(a.y - a.dispR, b.y - b.dispR) - 30;
+    drawEquationText(`${a.value} + ${b.value}`, midX, Math.max(46, topY),
+      clamp(Math.max(a.dispR, b.dispR)*0.38, 22, 44), 0.95);
+  }
+
+  let lastTime = null;
+  function update(dt) {
+    // background decorative bubbles
+    for (const d of bgBubbles) {
+      d.y -= d.speed*dt;
+      d.wobble += dt*0.8;
+      d.x += Math.sin(d.wobble)*6*dt;
+      if (d.y < -10) { d.y = H+10; d.x = Math.random()*W; }
+    }
+
+    // 0) finale: when he's merged everything into one bubble and lets it be, throw a
+    // party, then burst it into its parts (ones, or tens+ones past 12) as the new set.
+    if (!finale) {
+      const solo = bubbles.length === 1 ? bubbles[0] : null;
+      if (solo && solo.value > 1 && solo.dragPointerId == null && !solo.isSplitting && bonds.length === 0) {
+        soloTime += dt;
+        if (soloTime > 0.9) { finale = {timer: 0, bursts: 0}; soloTime = 0; playCelebrate(); }
+      } else soloTime = 0;
+    } else {
+      const solo = bubbles.length === 1 ? bubbles[0] : null;
+      if (!solo) finale = null;
+      else {
+        finale.timer += dt;
+        solo.scale = 1 + Math.sin(finale.timer*7)*0.07; // excited wobble
+        if (finale.timer > finale.bursts*0.3) {
+          const ang = Math.random()*Math.PI*2;
+          burst(solo.x + Math.cos(ang)*solo.dispR*0.9, solo.y + Math.sin(ang)*solo.dispR*0.9,
+            `hsl(${randInt(0,360)},95%,65%)`, 12, 180);
+          addRing(solo.x, solo.y, `hsla(${solo.hue},90%,70%,0.9)`, solo.dispR*(1.3+finale.bursts*0.12));
+          finale.bursts++;
+        }
+        if (finale.timer >= 1.9) { doFinaleBurst(solo); finale = null; }
+      }
+    }
+
+    // 1) dragged bubble: the body follows the finger like a weight on elastic. A gentle
+    // move keeps the gap tiny; a fast one opens a visible gap behind the finger. Once
+    // that gap is wide enough to count as tearing, the bubble gets progressively stickier
+    // (TEAR_STICKINESS), so the neck stays stretched without needing to keep sprinting
+    // across the screen — pull the finger back toward the body to call it off.
+    for (const b of bubbles) {
+      if (b.dragPointerId == null) continue;
+      // Once the gap is wide enough to count as a neck, the body all but stops chasing,
+      // so the stretch holds by itself — like real taffy, letting go of the pace doesn't
+      // heal it. The gap is then the finger's to control: keep it out and the tear
+      // completes; bring it back over the body and the neck closes up again.
+      const necked = b.stretch > b.r*SPLIT_TRIGGER_RATIO && b.value > 1 && !isBonded(b.id);
+      const rate = followRate(b.r) * (necked ? 1-TEAR_STICKINESS : 1);
+      const t = 1 - Math.exp(-Math.max(rate,0.2)*dt);
+      const nx = b.x + (b.fingerX-b.x)*t;
+      const ny = b.y + (b.fingerY-b.y)*t;
+      b.vx = dt>0 ? (nx-b.x)/dt : 0;
+      b.vy = dt>0 ? (ny-b.y)/dt : 0;
+      b.x = nx; b.y = ny;
+      b.stretch = dist(b.x,b.y,b.fingerX,b.fingerY);
+
+      if (b.stretch > b.r*SPLIT_TRIGGER_RATIO && b.value > 1 && !isBonded(b.id)) {
+        b.pullHold += dt;
+      } else {
+        b.pullHold = Math.max(0, b.pullHold - dt*1.5);
+      }
+      if (b.pullHold >= SPLIT_HOLD_TIME) {
+        performSplitFromDrag(b);
+      }
+    }
+
+    // 2) everyone else: friction on existing momentum + gentle ambient wander + walls
+    const bondedNow = new Set();
+    for (const bond of bonds) { bondedNow.add(bond.aId); bondedNow.add(bond.bId); }
+    for (const b of bubbles) {
+      if (b.dragPointerId != null) continue;
+      if (b.isSplitting) { // pinned under two fingers while the cut is being aimed
+        b.x = b.splitFixedX; b.y = b.splitFixedY; b.vx = 0; b.vy = 0;
+        continue;
+      }
+      b.phase += dt*(b.phaseSpeed + (Math.random()-0.5)*0.5);
+      // A bubble mid-blend stops wandering off on its own; the bond drives it instead.
+      const driftMag = bondedNow.has(b.id) ? 0 : clamp(900/b.r, 8, 34);
+      const friction = Math.pow(0.02, dt);
+      b.vx = b.vx*friction + Math.cos(b.phase)*driftMag*dt*2.2;
+      b.vy = b.vy*friction + Math.sin(b.phase)*driftMag*dt*2.2;
+      b.x += b.vx*dt; b.y += b.vy*dt;
+
+      if (b.x - b.r < 0) { b.x = b.r; b.vx = Math.abs(b.vx)*0.6; }
+      if (b.x + b.r > W) { b.x = W-b.r; b.vx = -Math.abs(b.vx)*0.6; }
+      if (b.y - b.r < 0) { b.y = b.r; b.vy = Math.abs(b.vy)*0.6; }
+      if (b.y + b.r > H) { b.y = H-b.r; b.vy = -Math.abs(b.vy)*0.6; }
+    }
+
+    // 3) bonds in progress: advance, hold, or let go; commit once fully bonded
+    const toMerge = [];
+    bonds = bonds.filter(bond => {
+      const a = bubbleById(bond.aId), b = bubbleById(bond.bId);
+      if (!a || !b) return false;
+      const d = dist(a.x,a.y,b.x,b.y);
+      // Distance alone decides: drag them apart and the blend unwinds. Velocity is a
+      // poor test here, since the bond itself moves bubbles by position.
+      const breakRange = (a.r+b.r)*BOND_BREAK_RATIO;
+      if (d < breakRange) {
+        bond.timer += dt;
+        // Draw the pair together to a touching distance (not concentric), so the neck
+        // between them stays visible for the whole slow blend.
+        const settle = (a.r+b.r)*BOND_SETTLE_RATIO;
+        if (d > settle && d > 0.01) {
+          const pull = (d-settle) * Math.min(1, dt*2.2);
+          const ux = (b.x-a.x)/d, uy = (b.y-a.y)/d;
+          const aFixed = a.dragPointerId != null, bFixed = b.dragPointerId != null;
+          if (aFixed && !bFixed)      { b.x -= ux*pull;     b.y -= uy*pull; }
+          else if (bFixed && !aFixed) { a.x += ux*pull;     a.y += uy*pull; }
+          else                        { a.x += ux*pull*0.5; a.y += uy*pull*0.5;
+                                        b.x -= ux*pull*0.5; b.y -= uy*pull*0.5; }
+        }
+        if (bond.timer >= ELONGATE_TIME) { toMerge.push(bond); return false; }
+        return true;
+      }
+      bond.timer -= dt*2;
+      return bond.timer > 0;
+    });
+    for (const bond of toMerge) {
+      const a = bubbleById(bond.aId), b = bubbleById(bond.bId);
+      if (a && b) mergeBubbles(a, b, a.value+b.value);
+    }
+
+    // 4) look for new bonds among bubbles not already bonded
+    const bondedIds = new Set();
+    for (const bond of bonds) { bondedIds.add(bond.aId); bondedIds.add(bond.bId); }
+    for (let i=0;i<bubbles.length;i++){
+      const a = bubbles[i];
+      if (bondedIds.has(a.id) || a.isSplitting) continue;
+      for (let j=i+1;j<bubbles.length;j++){
+        const b = bubbles[j];
+        if (bondedIds.has(b.id) || b.isSplitting || a.value+b.value > MAX_VALUE) continue;
+        if (a.bondCooldown > 0 || b.bondCooldown > 0) continue;
+        const d = dist(a.x,a.y,b.x,b.y);
+        if (d > (a.r+b.r)*BOND_START_RATIO) continue;
+        if (closingSpeed(a,b,d) > MOMENTUM_THRESHOLD) {
+          bonds.push({aId:a.id, bId:b.id, timer:0});
+          bondedIds.add(a.id); bondedIds.add(b.id);
+          break;
+        }
+      }
+    }
+
+    // 5) soft mutual repulsion for everyone not actively bonding
+    const bondedPairs = new Set(bonds.map(bo => bo.aId+'_'+bo.bId));
+    for (let i=0;i<bubbles.length;i++){
+      for (let j=i+1;j<bubbles.length;j++){
+        const a = bubbles[i], c = bubbles[j];
+        if (bondedPairs.has(a.id+'_'+c.id) || bondedPairs.has(c.id+'_'+a.id)) continue;
+        const d = dist(a.x,a.y,c.x,c.y);
+        const minD = a.r + c.r;
+        if (d > 0.01 && d < minD) {
+          const overlap = minD - d;
+          const nx = (c.x-a.x)/d, ny = (c.y-a.y)/d;
+          const aFixed = a.dragPointerId!=null || a.isSplitting;
+          const cFixed = c.dragPointerId!=null || c.isSplitting;
+          if (aFixed && !cFixed) { c.x += nx*overlap; c.y += ny*overlap; }
+          else if (cFixed && !aFixed) { a.x -= nx*overlap; a.y -= ny*overlap; }
+          else if (!aFixed && !cFixed) {
+            a.x -= nx*overlap*0.5; a.y -= ny*overlap*0.5;
+            c.x += nx*overlap*0.5; c.y += ny*overlap*0.5;
+          }
+        }
+      }
+    }
+
+    // scale + displayed-radius easing
+    for (const b of bubbles) {
+      b.scale += (1 - b.scale) * Math.min(1, dt*10);
+      b.dispR += (b.r - b.dispR) * Math.min(1, dt*8);
+      if (b.bondCooldown > 0) b.bondCooldown -= dt;
+    }
+
+    // particles
+    for (const p of particles) {
+      p.x += p.vx*dt; p.y += p.vy*dt;
+      p.vy += 220*dt; p.vx *= 0.98;
+      p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+
+    // rings
+    for (const rg of rings) {
+      rg.r += (rg.maxR-rg.r)*Math.min(1,dt*4) + 40*dt;
+      rg.alpha -= dt*1.4;
+    }
+    rings = rings.filter(rg => rg.alpha > 0 && rg.r < rg.maxR*1.05);
+
+    // ghost socket: breathe, and swallow a matching bubble that's been brought inside
+    if (ghost) ghost.pulse += dt*2;
+    if (targetEnabled && ghost && !finale) {
+      for (const b of bubbles) {
+        if (b.value === ghost.value && b.dragPointerId == null && !b.isSplitting &&
+            dist(b.x,b.y,ghost.x,ghost.y) < ghost.r*0.6) { fillGhost(b); break; }
+      }
+    }
+
+    // floating equations drift up and fade
+    for (const L of mathLabels) { L.y += L.vy*dt; L.life -= dt; }
+    mathLabels = mathLabels.filter(L => L.life > 0);
+  }
+
+  function render() {
+    ctx.fillStyle = bgGradient;
+    ctx.fillRect(0,0,W,H);
+
+    for (const d of bgBubbles) {
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.r, 0, Math.PI*2);
+      ctx.fillStyle = `rgba(255,255,255,${d.alpha})`;
+      ctx.fill();
+    }
+
+    for (const rg of rings) {
+      ctx.beginPath();
+      ctx.arc(rg.x, rg.y, rg.r, 0, Math.PI*2);
+      ctx.strokeStyle = rg.color.replace(/[\d.]+\)$/, Math.max(0,rg.alpha)+')');
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    // ghost socket: a dashed outline the size of the real answer, numeral hollow
+    if (targetEnabled && ghost) {
+      const gr = ghost.r * (1 + Math.sin(ghost.pulse)*0.02);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(ghost.x, ghost.y, gr, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.05)';
+      ctx.fill();
+      ctx.setLineDash([14,10]);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const fs = clamp(gr*0.72, 12, 300);
+      ctx.font = `900 ${fs}px -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineWidth = Math.max(2, fs*0.045);
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.strokeText(String(ghost.value), ghost.x, ghost.y + fs*0.03);
+      ctx.restore();
+    }
+
+    for (const bond of bonds) drawBondEffects(bond);
+    // no tear preview while a blend owns the bubble — one story at a time
+    for (const b of bubbles) if (b.dragPointerId != null && !isBonded(b.id)) drawDragEffects(b);
+    // Biggest at the back, smallest in front, so a small bubble moving over a large one
+    // is never swallowed by it.
+    const drawOrder = bubbles.slice().sort((p,q) => q.r - p.r);
+    for (const b of drawOrder) drawBubble(b);
+    for (const b of bubbles) if (b.isSplitting) drawSplitPreview(b);
+
+    for (const p of particles) {
+      ctx.globalAlpha = clamp(p.life/p.maxLife, 0, 1);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
+      ctx.fillStyle = p.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    for (const L of mathLabels) {
+      drawEquationText(L.text, L.x, L.y, L.size, clamp(L.life/0.6, 0, 1));
+    }
+  }
+
+  function loop(ts) {
+    if (lastTime == null) lastTime = ts;
+    const dt = Math.min((ts-lastTime)/1000, 0.05);
+    lastTime = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  // keep the sandbox alive
+  setInterval(() => {
+    // one bubble left means the finale owns the restart — don't photobomb it
+    if (finale || (bubbles.length === 1 && bubbles[0].value > 1)) return;
+    if (bubbles.length < 4) {
+      const v = randInt(1,9);
+      makeBubble(W*0.2+Math.random()*W*0.6, H*0.2+Math.random()*H*0.5, v, {popIn:true});
+    }
+  }, 25000);
+
+  // ---------- boot ----------
+  resize();
+  spawnDecorative();
+  spawnInitial();
+  pickNewTarget();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
