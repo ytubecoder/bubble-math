@@ -1,8 +1,37 @@
 # Bubble Math
 
+![Zero dependencies](https://img.shields.io/badge/dependencies-zero-blue)
+![Single file](https://img.shields.io/badge/build-none%2C%20single%20file-blue)
+![License: Source Available](https://img.shields.io/badge/license-Source%20Available-yellow)
+![Works with Claude Code](https://img.shields.io/badge/works%20with-Claude%20Code-blueviolet)
+
+```
+                         _______________________________________________
+                        /                                              /|
+                       /  BUBBLE MATH                                 / |
+                      /    ════════════                              /  |
+                     /     (5) + (6)  ·  (9) − (5)  ·  ⭐ target     /   |
+                    /_______________________________________________/    |
+                    |     ___         ___         ___                |    |
+     ___            |   .'   '.    .'   '.     .-'   '-.             |    |
+    (・‿・)          |  ( 3     ) →( merge ) → ( split ) ←╮           |  /
+     /||\           |   '.___.'    '.___.'     '-.___.-'    ╰──╮     | /
+    /  \            |_______________________________________________|/
+```
+
+> Drag to merge. Yank to tear. Nothing commits until you let go.
+
 A one-file, touch-first math toy for a young kid who can read numerals. Bubbles carry numbers 1–50 (numeral primary, dot ring grouped in tens as the countable layer, area proportional to value). Combining bubbles adds; pulling them apart subtracts. Every operation is slow, visible, and abortable, with the equation spelled out as it happens.
 
+Built for a 3-year-old. No build step, no dependencies, no backend — one `index.html` with canvas rendering, physics, and WebAudio tones.
+
+## Screenshot
+
+![Bubbles mid-play, showing merge-in-progress equation and the ghost-socket target](docs/screenshot.png)
+
 ## Play
+
+**[Play it here](https://ytubecoder.github.io/bubble-math/)**
 
 | Gesture | Result |
 |---|---|
@@ -16,19 +45,20 @@ A one-file, touch-first math toy for a young kid who can read numerals. Bubbles 
 
 Corner controls: 🔊 mute, ⭐ target on/off, + add a bubble. Totals are conserved by every interaction.
 
-## Run
-
-Any static server:
-
-```
-python3 -m http.server 4310 --bind 0.0.0.0
-```
-
-Open `http://<host>:4310/`. On this machine it's also exposed at
-`https://llm.rhino-balance.ts.net:5443/` via `tailscale serve --https=5443`.
-
 iPad: open in Safari, Share → Add to Home Screen for a fullscreen, zoom-proof app.
+
+## Run locally
+
+Any static server works:
+
+```bash
+python3 -m http.server 4310
+```
+
+Open `http://localhost:4310/`.
 
 ## Files
 
 - `index.html` — the entire app (canvas rendering, physics, audio via WebAudio, no dependencies)
+
+**Compatible with:** any modern browser · iPad Safari (home-screen app) · [Claude Code](https://claude.ai/code)
