@@ -4,8 +4,15 @@ Single-file kids' math toy (`index.html` — no deps, no build) for a 3-year-old
 
 ## Serving (machine state, not derivable from code)
 
+**Dev** (local iteration/testing, not connected to git):
 - Backing server: `python3 -m http.server 4310 --bind 0.0.0.0` run from this dir as a plain background process — does **not** survive reboot; restart it if the page 404s.
 - Tailnet: `tailscale serve --bg --https=5443 http://127.0.0.1:4310` → https://llm.rhino-balance.ts.net:5443/ (serve config persists across reboots). Always relay the link as `https://` — ts.net is HSTS-preloaded.
+
+**Prod** (public, playable): repo is `ytubecoder/bubble-math` on GitHub (public — GitHub Pages on private repos needs a paid plan, which this account doesn't have). GitHub Pages serves straight from the `main` branch root (`.nojekyll` present, no build step). `git push origin main` **is** the prod deploy — anything pushed there goes live within ~1-2 min at:
+
+https://ytubecoder.github.io/bubble-math/
+
+There is no separate `dev` branch — local serving above is the pre-push testing step; `main` is both the working branch and what's live.
 
 ## Design invariants
 
