@@ -86,7 +86,9 @@
   const DOUBLE_TAP_MS = 350;
   const DOUBLE_TAP_DIST = 30;
   const SPLIT_THRESHOLD = 46;     // finger separation (px) to commit a two-finger split
-  const DROP_MERGE_RATIO = 0.72;  // (r1+r2) multiple within which releasing merges
+  const MERGE_ALIGN_RATIO = 0.34; // (r1+r2) multiple centers must be within for a drop/release to merge —
+                                   // tight enough to require deliberately placing one bubble onto another,
+                                   // not just letting go somewhere nearby
   const HUES = [332, 190, 22, 96, 268, 48, 168, 210]; // curated bold palette
 
   const NECK_MIN_RATIO = 0.12;    // stretch/r beyond which a connecting neck is drawn at all
@@ -367,16 +369,24 @@
     playMerge(a.value, c.value, sum);
   }
 
-  // Releasing a bubble on top of another merges it, exactly as before. Momentum bonding
-  // is an easier additional route to the same result, not a replacement for this one.
-  function attemptDropMerge(b) {
+  // Same alignment test drives both the live "release here to join" glow while dragging
+  // and the actual commit on release, so what you see is exactly what you get — no
+  // threshold mismatch between preview and outcome.
+  function findMergeCandidate(b) {
     let candidate = null, bestDist = Infinity;
     for (const other of bubbles) {
       if (other === b || other.dragPointerId != null || other.isSplitting) continue;
       if (b.value + other.value > MAX_VALUE) continue;
       const d = dist(b.x,b.y,other.x,other.y);
-      if (d < (b.r+other.r)*DROP_MERGE_RATIO && d < bestDist) { candidate = other; bestDist = d; }
+      if (d < (b.r+other.r)*MERGE_ALIGN_RATIO && d < bestDist) { candidate = other; bestDist = d; }
     }
+    return candidate;
+  }
+
+  // Releasing a bubble centered on another merges it. Momentum bonding is an easier
+  // additional route to the same result, not a replacement for this one.
+  function attemptDropMerge(b) {
+    const candidate = findMergeCandidate(b);
     if (!candidate) return;
     bonds = bonds.filter(bo => bo.aId !== b.id && bo.bId !== b.id
                             && bo.aId !== candidate.id && bo.bId !== candidate.id);
@@ -767,6 +777,25 @@
     }
   }
 
+  // Shown while carrying a bubble onto another one closely enough that letting go right
+  // now would merge them — the join is decided live, in view, before release commits it,
+  // never as a silent thing that happens only after the finger lifts.
+  function drawMergeReady(b, candidate) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(candidate.x, candidate.y, candidate.dispR + 6, 0, Math.PI*2);
+    ctx.lineWidth = 4;
+    ctx.shadowColor = 'rgba(255,255,255,0.9)';
+    ctx.shadowBlur = 16;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.stroke();
+    ctx.restore();
+    const midX = (b.x+candidate.x)/2, midY = (b.y+candidate.y)/2;
+    const topR = Math.max(b.dispR, candidate.dispR);
+    drawEquationText(`${b.value} + ${candidate.value} = ${b.value+candidate.value}`, midX,
+      Math.max(46, midY - topR - 30), clamp(topR*0.34, 22, 44), 0.95);
+  }
+
   function drawSplitPreview(b) {
     const pA = pointerPos.get(b.splitPointerIds[0]), pB = pointerPos.get(b.splitPointerIds[1]);
     if (!pA || !pB) return;
@@ -1126,10 +1155,23 @@
 
     for (const bond of bonds) drawBondEffects(bond);
     // no tear preview while a blend owns the bubble — one story at a time
-    for (const b of bubbles) if (b.dragPointerId != null && !isBonded(b.id)) drawDragEffects(b);
+    for (const b of bubbles) if (b.dragPointerId != null && !isBonded(b.id)) {
+      drawDragEffects(b);
+      // Only one live readout at a time: skip the merge glow while the tear/carry neck
+      // is already showing (tearAnchored, or enough finger-to-body gap to preview a tear).
+      if (!b.tearAnchored && b.stretch <= b.dispR*NECK_MIN_RATIO) {
+        const candidate = findMergeCandidate(b);
+        if (candidate) drawMergeReady(b, candidate);
+      }
+    }
     // Biggest at the back, smallest in front, so a small bubble moving over a large one
-    // is never swallowed by it.
-    const drawOrder = bubbles.slice().sort((p,q) => q.r - p.r);
+    // is never swallowed by it — except the bubble actively under a finger, which always
+    // stays on top so it's never lost under something it's passing behind.
+    const drawOrder = bubbles.slice().sort((p,q) => {
+      const pDrag = p.dragPointerId != null ? 1 : 0, qDrag = q.dragPointerId != null ? 1 : 0;
+      if (pDrag !== qDrag) return pDrag - qDrag;
+      return q.r - p.r;
+    });
     for (const b of drawOrder) drawBubble(b);
     for (const b of bubbles) if (b.isSplitting) drawSplitPreview(b);
 
